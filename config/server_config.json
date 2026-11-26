@@ -1,0 +1,6 @@
+{
+  "host": "0.0.0.0",
+  "port": 5001,
+  "debug": false,
+  "output_dir": "~/Documents/TimeSenseApp_data"
+}

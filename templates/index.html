@@ -1,0 +1,814 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+  <meta charset="UTF-8">
+  <title>TSE App</title>
+
+  <style>
+    body {
+      font-family: Avenir, "Avenir Next", -apple-system, BlinkMacSystemFont, "Helvetica Neue", sans-serif;
+      margin: 16px;
+      font-size: 20px;
+    }
+
+    input, button {
+      font-size: 20px;
+      padding: 10px;
+      margin: 6px;
+    }
+
+    .meta {
+      margin-bottom: 16px;
+    }
+
+    .meta-row {
+      display: flex;
+      gap: 14px;
+      align-items: center;
+      flex-wrap: wrap;
+    }
+
+    .note-row {
+      margin-top: 8px;
+    }
+
+    .meta label {
+      font-size: 15px;
+    }
+
+    .meta input {
+      font-size: 15px;
+      padding: 6px;
+      width: 150px;
+    }
+
+    #note {
+      width: 500px;
+    }
+
+    .controls button {
+      min-width: 120px;
+    }
+
+    .slider-area {
+      margin-top: 30px;
+      padding-top: 12px;
+      padding-bottom: 18px;
+    }
+
+    .slider-value {
+      display: block;
+      width: 90%;
+      margin: 0 6px;
+      padding: 0 10px;
+      text-align: center;
+      font-size: 40px;
+      font-weight: 600;
+      font-variant-numeric: tabular-nums;
+    }
+
+    input[type="range"] {
+      width: 90%;
+      height: 56px;
+      -webkit-appearance: none;
+      appearance: none;
+      background: transparent;
+      cursor: pointer;
+    }
+
+    input[type="range"]::-webkit-slider-runnable-track {
+      height: 16px;
+      background: #ddd;
+      border-radius: 999px;
+    }
+
+    input[type="range"]::-webkit-slider-thumb {
+      -webkit-appearance: none;
+      appearance: none;
+      width: 48px;
+      height: 48px;
+      margin-top: -16px;
+      background: #333;
+      border-radius: 50%;
+      border: none;
+    }
+
+    input[type="range"]::-moz-range-track {
+      height: 16px;
+      background: #ddd;
+      border-radius: 999px;
+    }
+
+    input[type="range"]::-moz-range-thumb {
+      width: 48px;
+      height: 48px;
+      background: #333;
+      border-radius: 50%;
+      border: none;
+    }
+
+    .button-grid {
+      display: grid;
+      gap: 12px;
+      margin-top: 24px;
+      max-width: 700px;
+    }
+
+    .choice-button {
+      height: 80px;
+      border: 2px solid #333;
+      background: white;
+      border-radius: 10px;
+    }
+
+    .choice-button.active {
+      background: #333;
+      color: white;
+    }
+
+    .status {
+      margin-top: 20px;
+      font-weight: bold;
+    }
+  </style>
+</head>
+
+<body>
+  <h1>Time-Sensory Evaluation App</h1>
+
+  <div class="meta">
+    <div class="meta-row">
+      <label>Data title: <input id="data_title" value=""></label>
+      <label>Subject ID: <input id="subject_id" value=""></label>
+      <label>Sample ID: <input id="sample_id" value=""></label>
+      <label>Trial No: <input id="trial_no" value="1"></label>
+    </div>
+
+    <div class="note-row">
+      <label>Note: <input id="note" value=""></label>
+    </div>
+  </div>
+
+  <div class="controls">
+    <button id="start_btn" onclick="startTrial()" disabled>Start</button>
+    <button id="pause_btn" onclick="togglePause()" disabled>Pause</button>
+    <button id="finish_btn" onclick="finishTrial()" disabled>Finish</button>
+  </div>
+
+  <div class="status" id="status">Status: loading config</div>
+  <div class="status" id="time_display">t = 0.000 s</div>
+
+  <div id="sliders_container"></div>
+
+  <h2>Buttons</h2>
+  <div class="button-grid" id="button_grid"></div>
+
+  <script>
+    // =========================
+    // Config loaded from server-side user settings
+    // =========================
+    let APP_CONFIG = null;
+    let buttonIds = [];
+    let sliderIds = [];
+
+    async function loadConfig() {
+      const response = await fetch("/app_config");
+
+      if (!response.ok) {
+        throw new Error("Failed to load app config");
+      }
+
+      APP_CONFIG = await response.json();
+
+      if (!APP_CONFIG.sliders) {
+        APP_CONFIG.sliders = [];
+      }
+
+      if (!APP_CONFIG.buttons) {
+        APP_CONFIG.buttons = [];
+      }
+
+      if (!APP_CONFIG.selectionMode) {
+        APP_CONFIG.selectionMode = "tcata";
+      }
+
+      if (!APP_CONFIG.buttonColumns) {
+        APP_CONFIG.buttonColumns = 3;
+      }
+
+      if (APP_CONFIG.showTimeDisplay === undefined) {
+        APP_CONFIG.showTimeDisplay = false;
+      }
+
+      APP_CONFIG.sliders = APP_CONFIG.sliders.filter(item => item.enabled !== false);
+      APP_CONFIG.buttons = APP_CONFIG.buttons.filter(item => item.enabled !== false);
+      buttonIds = APP_CONFIG.buttons.map(button => button.id);
+      sliderIds = APP_CONFIG.sliders.map(slider => slider.id);
+    }
+
+    // =========================
+    // State variables
+    // =========================
+    let trialStarted = false;
+    let paused = false;
+
+    let startTimeMs = null;
+    let pauseStartMs = null;
+    let totalPausedMs = 0;
+
+    let trialId = "";
+    let buttonStates = {};
+    let timerInterval = null;
+    let eventOutbox = [];
+    let flushPromise = null;
+    let startInProgress = false;
+    let finishInProgress = false;
+    let finishQueued = false;
+
+    // =========================
+    // UI rendering
+    // =========================
+    function formatSliderValue(value, slider = {}) {
+      const numericValue = Number(value);
+      const magnitude = Math.abs(numericValue);
+      const mode = slider.roundingMode || "decade5";
+      let precise;
+      if (mode === "sig2" || mode === "sig3") {
+        precise = Number(numericValue.toPrecision(mode === "sig2" ? 2 : 3));
+      } else {
+        const step = mode === "multiple5" ? 5
+          : magnitude === 0 ? 1 : 0.5 * 10 ** Math.floor(Math.log10(magnitude));
+        const quantized = Math.sign(numericValue) * Math.round(magnitude / step) * step;
+        precise = mode === "multiple5" ? quantized : Number(quantized.toPrecision(2));
+      }
+      const integer = Math.sign(precise) * Math.floor(Math.abs(precise) + 0.5);
+      const text = integer.toFixed(0);
+      if (!text.includes("e")) return text;
+      const [coefficient, exponent] = text.split("e");
+      const digits = coefficient.replace(".", "");
+      const count = digits.replace("-", "").length;
+      return digits + "0".repeat(Number(exponent) + 1 - count);
+    }
+
+    // Disabled ends retain 1/4 of the track; enabled ends use 1/6.
+    // The middle half receives the remaining width before initial centering.
+    function sliderSegmentWidths(slider) {
+      const left = (slider.compressLeft ?? slider.compressEnds) !== false ? 1 / 6 : 1 / 4;
+      const right = (slider.compressRight ?? slider.compressEnds) !== false ? 1 / 6 : 1 / 4;
+      return { left, right, middle: 1 - left - right };
+    }
+
+    function compressSliderPosition(position, slider) {
+      const p = Math.max(0, Math.min(1, position));
+      const { left, right, middle } = sliderSegmentWidths(slider);
+      if (p <= 0.25) return p * 4 * left;
+      if (p <= 0.75) return left + (p - 0.25) * 2 * middle;
+      return 1 - right + (p - 0.75) * 4 * right;
+    }
+
+    function expandSliderPosition(position, slider) {
+      const p = Math.max(0, Math.min(1, Number(position)));
+      const { left, right, middle } = sliderSegmentWidths(slider);
+      if (p <= left) return p / (4 * left);
+      if (p <= 1 - right) return 0.25 + (p - left) / (2 * middle);
+      return 0.75 + (p - (1 - right)) / (4 * right);
+    }
+
+    function customSliderMap(slider, input, inverse) {
+      const points = slider.anchors;
+      const coordinate = point => inverse ? point.position / 100
+        : slider.scale === "log" ? Math.log10(point.value) : Number(point.value);
+      const output = point => inverse
+        ? slider.scale === "log" ? Math.log10(point.value) : Number(point.value)
+        : point.position / 100;
+      const x = inverse ? Number(input) : slider.scale === "log" ? Math.log10(input) : Number(input);
+      let index = 1;
+      while (index < points.length - 1 && x > coordinate(points[index])) index++;
+      const a = points[index - 1], b = points[index];
+      const fraction = Math.max(0, Math.min(1, (x - coordinate(a)) / (coordinate(b) - coordinate(a))));
+      const result = output(a) + fraction * (output(b) - output(a));
+      return inverse && slider.scale === "log" ? 10 ** result : result;
+    }
+
+    function baseSliderPosition(slider, value) {
+      const lower = Number(slider.min);
+      const upper = Number(slider.max);
+      if (upper === lower) return 0;
+      const position = slider.scale === "log"
+        ? (Math.log10(value) - Math.log10(lower)) / (Math.log10(upper) - Math.log10(lower))
+        : (Number(value) - lower) / (upper - lower);
+      return compressSliderPosition(position, slider);
+    }
+
+    function initialPivot(slider) {
+      if (slider.centerInitial === false ||
+          !(Number(slider.initial) > Number(slider.min) &&
+            Number(slider.initial) < Number(slider.max))) return null;
+      return baseSliderPosition(slider, slider.initial);
+    }
+
+    function sliderPosition(slider, value) {
+      if (slider.customPositions) return customSliderMap(slider, value, false);
+      const position = baseSliderPosition(slider, value);
+      const pivot = initialPivot(slider);
+      if (pivot === null) return position;
+      return position <= pivot
+        ? 0.5 * position / pivot
+        : 0.5 + 0.5 * (position - pivot) / (1 - pivot);
+    }
+
+    function sliderValue(slider, position) {
+      if (slider.customPositions) return customSliderMap(slider, position, true);
+      const lower = Number(slider.min);
+      const upper = Number(slider.max);
+      const p = Math.max(0, Math.min(1, Number(position)));
+      const pivot = initialPivot(slider);
+      if (pivot !== null && p === 0.5) return Number(slider.initial);
+      const uncentered = pivot === null ? p : (p <= 0.5
+        ? p * 2 * pivot
+        : pivot + (p - 0.5) * 2 * (1 - pivot));
+      const expanded = expandSliderPosition(uncentered, slider);
+      if (expanded <= 0) return lower;
+      if (expanded >= 1) return upper;
+      if (slider.scale === "log") {
+        return 10 ** (Math.log10(lower) + expanded * (Math.log10(upper) - Math.log10(lower)));
+      }
+      const value = lower + expanded * (upper - lower);
+      const step = Number(slider.step);
+      // Preserve the configured linear increment in value space.
+      const stepped = step > 0
+        ? Math.max(lower, Math.min(upper, lower + Math.round((value - lower) / step) * step))
+        : value;
+      // Include initial as a selectable value without reversing direction near the center.
+      if (pivot !== null) {
+        return p < 0.5 ? Math.min(stepped, Number(slider.initial))
+          : Math.max(stepped, Number(slider.initial));
+      }
+      return stepped;
+    }
+
+    function renderInputs() {
+      const slidersContainer = document.getElementById("sliders_container");
+      slidersContainer.innerHTML = "";
+
+      APP_CONFIG.sliders.forEach(slider => {
+        const logarithmic = slider.scale === "log";
+        if (logarithmic && !(
+          [slider.min, slider.max, slider.initial].every(v => Number.isFinite(Number(v))) &&
+          Number(slider.min) > 0 && Number(slider.max) > Number(slider.min) &&
+          Number(slider.initial) >= Number(slider.min) &&
+          Number(slider.initial) <= Number(slider.max)
+        )) {
+          throw new Error(`Invalid logarithmic slider: ${slider.id} (0 < min < max; min <= initial <= max)`);
+        }
+        const block = document.createElement("div");
+        block.className = "slider-area";
+
+        block.innerHTML = `
+          <h2>${slider.label}</h2>
+          <span class="slider-value" style="${slider.showValue === false ? "display:none" : ""}" id="${slider.id}_value">${formatSliderValue(slider.initial, slider)}</span>
+          <input
+            id="${slider.id}"
+            type="range"
+            min="0"
+            max="1"
+            step="any"
+            value="${sliderPosition(slider, slider.initial)}"
+            disabled
+            oninput="onSliderInput('${slider.id}', this.value)"
+          >
+        `;
+
+        slidersContainer.appendChild(block);
+      });
+
+      const buttonGrid = document.getElementById("button_grid");
+      buttonGrid.innerHTML = "";
+      buttonGrid.style.gridTemplateColumns = `repeat(${APP_CONFIG.buttonColumns}, 1fr)`;
+
+      APP_CONFIG.buttons.forEach(button => {
+        const btn = document.createElement("button");
+        btn.className = "choice-button";
+        btn.id = button.id;
+        btn.textContent = button.label;
+        btn.disabled = true;
+        btn.onclick = () => toggleButton(button.id);
+
+        buttonGrid.appendChild(btn);
+      });
+    }
+
+    // =========================
+    // Metadata
+    // =========================
+
+    function getDeviceId() {
+      let deviceId = localStorage.getItem("tse_device_id");
+
+      if (!deviceId) {
+        if (window.crypto && crypto.randomUUID) {
+          deviceId = "device_" + crypto.randomUUID().slice(0, 8);
+        } else {
+          deviceId = "device_" + Math.random().toString(16).slice(2, 10);
+        }
+
+        localStorage.setItem("tse_device_id", deviceId);
+      }
+
+      return deviceId;
+    }
+
+    function getMeta() {
+      const dataTitle = document.getElementById("data_title").value.trim();
+      const subjectId = document.getElementById("subject_id").value.trim();
+      const sampleId = document.getElementById("sample_id").value.trim();
+      const trialNo = document.getElementById("trial_no").value.trim();
+      const note = document.getElementById("note").value.trim();
+
+      const paddedTrialNo = String(trialNo).padStart(3, "0");
+      const trialId = `${dataTitle}_${subjectId}_${sampleId}_${paddedTrialNo}`;
+      const deviceId = getDeviceId();
+
+      return {
+        data_title: dataTitle,
+        subject_id: subjectId,
+        sample_id: sampleId,
+        trial_no: trialNo,
+        trial_id: trialId,
+        device_id: deviceId,
+        note: note
+      };
+    }
+
+    // =========================
+    // Time
+    // =========================
+    function currentTimeSec() {
+      if (!trialStarted || startTimeMs === null) {
+        return 0.0;
+      }
+
+      const nowMs = performance.now();
+      let pausedMs = totalPausedMs;
+
+      if (paused && pauseStartMs !== null) {
+        pausedMs += nowMs - pauseStartMs;
+      }
+
+      return (nowMs - startTimeMs - pausedMs) / 1000.0;
+    }
+
+    function updateTimeDisplay() {
+      const timeDisplay = document.getElementById("time_display");
+
+      if (!APP_CONFIG || !APP_CONFIG.showTimeDisplay) {
+        timeDisplay.style.display = "none";
+        return;
+      }
+
+      timeDisplay.style.display = "block";
+      timeDisplay.textContent = `t = ${currentTimeSec().toFixed(3)} s`;
+    }
+
+    // =========================
+    // Enable / disable controls
+    // =========================
+    function setMetaDisabled(disabled) {
+      ["data_title", "subject_id", "sample_id", "trial_no", "note"].forEach(id => {
+        document.getElementById(id).disabled = disabled;
+      });
+    }
+
+    function setInputsDisabled(disabled) {
+      sliderIds.forEach(id => {
+        document.getElementById(id).disabled = disabled;
+      });
+
+      buttonIds.forEach(id => {
+        document.getElementById(id).disabled = disabled;
+      });
+    }
+
+    function setControlButtonsReady() {
+      document.getElementById("start_btn").disabled = false;
+      document.getElementById("pause_btn").disabled = true;
+      document.getElementById("finish_btn").disabled = true;
+    }
+
+    // =========================
+    // Send events to Flask server in the order in which they occurred.
+    // =========================
+    function makeEventPayload(inputType, inputId, value, eventName) {
+      const meta = getMeta();
+
+      return {
+        ...meta,
+        t_sec: currentTimeSec().toFixed(3),
+        input_type: inputType,
+        input_id: inputId,
+        value: value,
+        event: eventName
+      };
+    }
+
+    async function postEvent(payload) {
+      const response = await fetch("/event", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json"
+        },
+        body: JSON.stringify(payload)
+      });
+
+      if (!response.ok) {
+        throw new Error(`Server returned ${response.status}`);
+      }
+
+      return response.json();
+    }
+
+    async function drainEventOutbox() {
+      while (eventOutbox.length > 0) {
+        await postEvent(eventOutbox[0]);
+        eventOutbox.shift();
+      }
+    }
+
+    function flushEventOutbox() {
+      if (flushPromise === null) {
+        flushPromise = drainEventOutbox().finally(() => {
+          flushPromise = null;
+        });
+      }
+
+      return flushPromise.then(() => {
+        if (eventOutbox.length > 0) {
+          return flushEventOutbox();
+        }
+      });
+    }
+
+    function queueEvent(inputType, inputId, value, eventName) {
+      eventOutbox.push(makeEventPayload(inputType, inputId, value, eventName));
+
+      flushEventOutbox().catch(err => {
+        console.error("Send failed:", err);
+
+        if (!finishInProgress) {
+          document.getElementById("status").textContent =
+            "送信に失敗しました（データは再送用に保持されています）";
+        }
+      });
+    }
+
+    // =========================
+    // Trial controls
+    // =========================
+    async function startTrial() {
+      if (startInProgress || trialStarted || eventOutbox.length > 0) {
+        return;
+      }
+
+      startInProgress = true;
+      trialStarted = true;
+      paused = false;
+
+      startTimeMs = performance.now();
+      pauseStartMs = null;
+      totalPausedMs = 0;
+
+      trialId = getMeta().trial_id;
+
+      buttonStates = {};
+      buttonIds.forEach(id => {
+        buttonStates[id] = false;
+        document.getElementById(id).classList.remove("active");
+      });
+
+      APP_CONFIG.sliders.forEach(slider => {
+        const sliderElement = document.getElementById(slider.id);
+        const valueElement = document.getElementById(`${slider.id}_value`);
+        sliderElement.value = sliderPosition(slider, slider.initial);
+        valueElement.textContent = formatSliderValue(slider.initial, slider);
+      });
+
+      setMetaDisabled(true);
+      setInputsDisabled(true);
+
+      document.getElementById("start_btn").disabled = true;
+      document.getElementById("pause_btn").disabled = true;
+      document.getElementById("finish_btn").disabled = true;
+
+      document.getElementById("status").textContent = "開始処理中…";
+
+      queueEvent("control", "start", "", "start");
+
+      try {
+        await flushEventOutbox();
+      } catch (error) {
+        console.error("Start failed:", error);
+        trialStarted = false;
+        paused = false;
+        startTimeMs = null;
+        eventOutbox = [];
+
+        setMetaDisabled(false);
+        setInputsDisabled(true);
+        setControlButtonsReady();
+        document.getElementById("status").textContent =
+          "開始情報の送信に失敗しました。サーバーを確認して再試行してください。";
+        startInProgress = false;
+        return;
+      }
+
+      setInputsDisabled(false);
+      document.getElementById("pause_btn").disabled = false;
+      document.getElementById("finish_btn").disabled = false;
+      document.getElementById("status").textContent = "Status: running";
+      startInProgress = false;
+
+      if (timerInterval !== null) {
+        clearInterval(timerInterval);
+      }
+
+      timerInterval = setInterval(updateTimeDisplay, 50);
+      updateTimeDisplay();
+    }
+
+    function togglePause() {
+      if (!trialStarted) return;
+
+      if (!paused) {
+        paused = true;
+        pauseStartMs = performance.now();
+
+        setInputsDisabled(true);
+
+        document.getElementById("pause_btn").textContent = "Resume";
+        document.getElementById("status").textContent = "Status: paused";
+
+        queueEvent("control", "pause", "", "pause");
+      } else {
+        paused = false;
+        totalPausedMs += performance.now() - pauseStartMs;
+        pauseStartMs = null;
+
+        setInputsDisabled(false);
+
+        document.getElementById("pause_btn").textContent = "Pause";
+        document.getElementById("status").textContent = "Status: running";
+
+        queueEvent("control", "resume", "", "resume");
+      }
+
+      updateTimeDisplay();
+    }
+
+    async function finishTrial() {
+      if (!trialStarted || finishInProgress) return;
+
+      finishInProgress = true;
+
+      if (!paused) {
+        paused = true;
+        pauseStartMs = performance.now();
+      }
+
+      setInputsDisabled(true);
+      setMetaDisabled(true);
+      document.getElementById("start_btn").disabled = true;
+      document.getElementById("pause_btn").disabled = true;
+      document.getElementById("finish_btn").disabled = true;
+      document.getElementById("finish_btn").textContent = "Finish";
+      document.getElementById("status").textContent = "送信中…";
+
+      if (!finishQueued) {
+        queueEvent("control", "finish", "", "finish");
+        finishQueued = true;
+      }
+
+      try {
+        await flushEventOutbox();
+      } catch (error) {
+        console.error("Finish failed:", error);
+        finishInProgress = false;
+        document.getElementById("finish_btn").disabled = false;
+        document.getElementById("finish_btn").textContent = "Retry Finish";
+        document.getElementById("status").textContent =
+          "送信に失敗しました。サーバーを確認してFinishを再送してください。";
+        return;
+      }
+
+      trialStarted = false;
+      paused = false;
+      finishInProgress = false;
+      finishQueued = false;
+      startTimeMs = null;
+      pauseStartMs = null;
+      totalPausedMs = 0;
+
+      if (timerInterval !== null) {
+        clearInterval(timerInterval);
+        timerInterval = null;
+      }
+
+      setMetaDisabled(false);
+      setInputsDisabled(true);
+
+      document.getElementById("start_btn").disabled = false;
+      document.getElementById("pause_btn").disabled = true;
+      document.getElementById("pause_btn").textContent = "Pause";
+      document.getElementById("finish_btn").disabled = true;
+
+      document.getElementById("status").textContent =
+        "保存完了。次の実験を開始できます。";
+
+      updateTimeDisplay();
+    }
+
+    // =========================
+    // Input events
+    // =========================
+    function onSliderInput(sliderId, value) {
+      if (!trialStarted || paused) return;
+
+      const slider = APP_CONFIG.sliders.find(item => item.id === sliderId);
+      const displayedValue = formatSliderValue(sliderValue(slider, value), slider);
+      document.getElementById(`${sliderId}_value`).textContent = displayedValue;
+      queueEvent("slider", sliderId, displayedValue, "input");
+    }
+
+    function toggleButton(buttonId) {
+      if (!trialStarted || paused) return;
+
+      const mode = (APP_CONFIG.selectionMode || "tcata").toLowerCase();
+
+      if (mode === "tds") {
+        // TDS mode: only one button can be active.
+        const alreadyActive = buttonStates[buttonId] || false;
+
+        if (alreadyActive) {
+          return;
+        }
+
+        buttonIds.forEach(id => {
+          if (buttonStates[id]) {
+            buttonStates[id] = false;
+            document.getElementById(id).classList.remove("active");
+            queueEvent("button", id, 0, "deselect");
+          }
+        });
+
+        buttonStates[buttonId] = true;
+        document.getElementById(buttonId).classList.add("active");
+        queueEvent("button", buttonId, 1, "select");
+
+      } else {
+        // TCATA mode: multiple buttons can be active.
+        const current = buttonStates[buttonId] || false;
+        const next = !current;
+        buttonStates[buttonId] = next;
+
+        const btn = document.getElementById(buttonId);
+
+        if (next) {
+          btn.classList.add("active");
+          queueEvent("button", buttonId, 1, "select");
+        } else {
+          btn.classList.remove("active");
+          queueEvent("button", buttonId, 0, "deselect");
+        }
+      }
+    }
+
+    // =========================
+    // Initialize
+    // =========================
+    async function initializeApp() {
+      try {
+        await loadConfig();
+        renderInputs();
+        updateTimeDisplay();
+        setControlButtonsReady();
+
+        document.getElementById("status").textContent = "Status: ready";
+      } catch (error) {
+        console.error(error);
+        document.getElementById("status").textContent = "Status: config load failed";
+        document.getElementById("start_btn").disabled = true;
+      }
+    }
+
+    window.addEventListener("beforeunload", event => {
+      if (!trialStarted && eventOutbox.length === 0) {
+        return;
+      }
+
+      event.preventDefault();
+      event.returnValue = "";
+    });
+
+    initializeApp();
+  </script>
+</body>
+</html>

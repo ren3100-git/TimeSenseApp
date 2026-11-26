@@ -1,0 +1,11 @@
+.DS_Store
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+build/
+dist/
+_tmp_network_qr.png
+*.csv
+!tests/fixtures/*.csv

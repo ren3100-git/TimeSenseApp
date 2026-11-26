@@ -1,0 +1,41 @@
+{
+  "showTimeDisplay": false,
+  "sliders": [
+    {
+      "id": "slider_1",
+      "label": "scale 1",
+      "min": 0,
+      "max": 100,
+      "step": 1,
+      "initial": 50
+    }
+  ],
+  "buttons": [
+    {
+      "id": "button_1",
+      "label": "item_1"
+    },
+    {
+      "id": "button_2",
+      "label": "item_2"
+    },
+    {
+      "id": "button_3",
+      "label": "item_3"
+    },
+    {
+      "id": "button_4",
+      "label": "item_4"
+    },
+    {
+      "id": "button_5",
+      "label": "item_5"
+    },
+    {
+      "id": "button_6",
+      "label": "item_6"
+    }
+  ],
+  "buttonColumns": 3,
+  "selectionMode": "tds"
+}
